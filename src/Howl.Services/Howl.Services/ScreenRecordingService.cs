@@ -6,22 +6,26 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Howl.Core.Models;
+using System.Collections.Concurrent;
 
 namespace Howl.Services;
 
 public class ScreenRecordingService : IDisposable
 {
     private RecordingSession? _currentSession;
-    private bool _isRecording;
+    private volatile bool _isRecording;
     private string _tempDirectory;
     private IntPtr _mouseHookID = IntPtr.Zero;
     private IntPtr _keyboardHookID = IntPtr.Zero;
     private LowLevelMouseProc? _mouseProc;
     private LowLevelKeyboardProc? _keyboardProc;
+    private GCHandle _mouseProcHandle;
+    private GCHandle _keyboardProcHandle;
     private System.Threading.Timer? _windowCheckTimer;
     private System.Threading.Timer? _screenshotTimer;
     private string _lastWindowTitle = string.Empty;
     private int _screenshotCounter = 0;
+    private readonly object _sessionLock = new object();
 
     // Windows API constants
     private const int WH_MOUSE_LL = 14;
@@ -106,9 +110,11 @@ public class ScreenRecordingService : IDisposable
         Directory.CreateDirectory(Path.Combine(_currentSession.OutputDirectory, "frames"));
 
         _isRecording = true;
+        _screenshotCounter = 0;
 
-        // Set up mouse hook
+        // Set up mouse hook - pin delegate to prevent GC
         _mouseProc = MouseHookCallback;
+        _mouseProcHandle = GCHandle.Alloc(_mouseProc);
         using (var curProcess = System.Diagnostics.Process.GetCurrentProcess())
         using (var curModule = curProcess.MainModule)
         {
@@ -118,8 +124,9 @@ public class ScreenRecordingService : IDisposable
             }
         }
 
-        // Set up keyboard hook
+        // Set up keyboard hook - pin delegate to prevent GC
         _keyboardProc = KeyboardHookCallback;
+        _keyboardProcHandle = GCHandle.Alloc(_keyboardProc);
         using (var curProcess = System.Diagnostics.Process.GetCurrentProcess())
         using (var curModule = curProcess.MainModule)
         {
@@ -146,18 +153,26 @@ public class ScreenRecordingService : IDisposable
         _isRecording = false;
         _currentSession.EndTime = DateTime.Now;
 
-        // Unhook mouse
+        // Unhook mouse and free pinned delegate
         if (_mouseHookID != IntPtr.Zero)
         {
             UnhookWindowsHookEx(_mouseHookID);
             _mouseHookID = IntPtr.Zero;
         }
+        if (_mouseProcHandle.IsAllocated)
+        {
+            _mouseProcHandle.Free();
+        }
 
-        // Unhook keyboard
+        // Unhook keyboard and free pinned delegate
         if (_keyboardHookID != IntPtr.Zero)
         {
             UnhookWindowsHookEx(_keyboardHookID);
             _keyboardHookID = IntPtr.Zero;
+        }
+        if (_keyboardProcHandle.IsAllocated)
+        {
+            _keyboardProcHandle.Free();
         }
 
         // Stop window monitoring
@@ -185,7 +200,10 @@ public class ScreenRecordingService : IDisposable
                     DateTime.Now
                 );
 
-                _currentSession.Clicks.Add(clickEvent);
+                lock (_sessionLock)
+                {
+                    _currentSession.Clicks.Add(clickEvent);
+                }
             }
         }
 
@@ -229,7 +247,10 @@ public class ScreenRecordingService : IDisposable
                     keystrokeEvent.Text = GetPrintableChar(vkCode, shiftPressed);
                 }
 
-                _currentSession.Keystrokes.Add(keystrokeEvent);
+                lock (_sessionLock)
+                {
+                    _currentSession.Keystrokes.Add(keystrokeEvent);
+                }
             }
         }
 
@@ -341,13 +362,17 @@ public class ScreenRecordingService : IDisposable
                 var process = System.Diagnostics.Process.GetProcessById((int)processId);
 
                 var windowEvent = new WindowEvent(title, process.ProcessName, DateTime.Now);
-                _currentSession.WindowEvents.Add(windowEvent);
+                lock (_sessionLock)
+                {
+                    _currentSession.WindowEvents.Add(windowEvent);
+                }
                 _lastWindowTitle = title;
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore errors in window title checking
+            // Log but continue - window title checking is non-critical
+            Console.WriteLine($"[ScreenRecording] Window title check error: {ex.Message}");
         }
     }
 
@@ -375,22 +400,38 @@ public class ScreenRecordingService : IDisposable
 
             _screenshotCounter++;
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore screenshot errors
+            // Log but continue - screenshot capture is non-critical
+            Console.WriteLine($"[ScreenRecording] Screenshot capture error: {ex.Message}");
         }
     }
 
     public void Dispose()
     {
+        // Unhook and clean up mouse hook
         if (_mouseHookID != IntPtr.Zero)
         {
             UnhookWindowsHookEx(_mouseHookID);
+            _mouseHookID = IntPtr.Zero;
         }
+        if (_mouseProcHandle.IsAllocated)
+        {
+            _mouseProcHandle.Free();
+        }
+
+        // Unhook and clean up keyboard hook
         if (_keyboardHookID != IntPtr.Zero)
         {
             UnhookWindowsHookEx(_keyboardHookID);
+            _keyboardHookID = IntPtr.Zero;
         }
+        if (_keyboardProcHandle.IsAllocated)
+        {
+            _keyboardProcHandle.Free();
+        }
+
+        // Clean up timers
         _windowCheckTimer?.Dispose();
         _screenshotTimer?.Dispose();
     }

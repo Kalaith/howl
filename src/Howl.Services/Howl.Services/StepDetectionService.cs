@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using Howl.Core.Models;
@@ -10,10 +8,6 @@ namespace Howl.Services;
 
 public class StepDetectionService
 {
-    private const int ClickMergeWindowMs = 300;
-    private const int StepMergeWindowMs = 2000;
-    private const double VisualChangeThreshold = 0.1; // 10% pixel difference
-    private const double DuplicateThreshold = 0.95; // 95% similarity = duplicate
 
     public List<StepCandidate> DetectSteps(RecordingSession session)
     {
@@ -74,67 +68,6 @@ public class StepDetectionService
         return relevantEvent?.WindowTitle ?? "Unknown";
     }
 
-    private bool CheckWindowChangeAfterClick(List<WindowEvent> windowEvents, DateTime clickTime)
-    {
-        return windowEvents.Any(w =>
-            w.Timestamp > clickTime &&
-            (w.Timestamp - clickTime).TotalMilliseconds < 1000);
-    }
-
-    private List<StepCandidate> MergeAdjacentSteps(List<StepCandidate> candidates)
-    {
-        if (candidates.Count <= 1)
-            return candidates;
-
-        var merged = new List<StepCandidate>();
-        merged.Add(candidates[0]);
-
-        for (int i = 1; i < candidates.Count; i++)
-        {
-            var current = candidates[i];
-            var previous = merged[merged.Count - 1];
-
-            // Check if we should merge
-            bool shouldMerge =
-                current.WindowTitle == previous.WindowTitle &&
-                (current.Timestamp - previous.Timestamp).TotalMilliseconds < StepMergeWindowMs;
-
-            if (!shouldMerge)
-            {
-                merged.Add(current);
-            }
-            // If merging, we just skip the current one (keep the first)
-        }
-
-        // Renumber
-        for (int i = 0; i < merged.Count; i++)
-        {
-            merged[i].Index = i + 1;
-        }
-
-        return merged;
-    }
-
-    private void AssociateScreenshots(List<StepCandidate> candidates, RecordingSession session)
-    {
-        if (string.IsNullOrEmpty(session.OutputDirectory))
-            return;
-
-        var framesDir = Path.Combine(session.OutputDirectory, "frames");
-        if (!Directory.Exists(framesDir))
-            return;
-
-        var screenshots = Directory.GetFiles(framesDir, "*.png")
-            .OrderBy(f => f)
-            .ToList();
-
-        // Simple association: match step index to screenshot index
-        for (int i = 0; i < candidates.Count && i < screenshots.Count; i++)
-        {
-            candidates[i].ScreenshotPath = screenshots[i];
-        }
-    }
-
     private void AssociateKeystrokes(List<StepCandidate> candidates, RecordingSession session)
     {
         if (candidates.Count == 0 || session.Keystrokes.Count == 0)
@@ -169,126 +102,5 @@ public class StepDetectionService
             }
         }
     }
-
-    private int RemoveDuplicateScreenshots(RecordingSession session)
-    {
-        if (string.IsNullOrEmpty(session.OutputDirectory))
-            return 0;
-
-        var framesDir = Path.Combine(session.OutputDirectory, "frames");
-        if (!Directory.Exists(framesDir))
-            return 0;
-
-        var screenshots = Directory.GetFiles(framesDir, "*.png")
-            .OrderBy(f => f)
-            .ToList();
-
-        if (screenshots.Count <= 1)
-            return 0;
-
-        var toDelete = new List<string>();
-        Bitmap? previousBitmap = null;
-
-        try
-        {
-            for (int i = 0; i < screenshots.Count; i++)
-            {
-                try
-                {
-                    using var currentBitmap = new Bitmap(screenshots[i]);
-
-                    if (previousBitmap != null)
-                    {
-                        // Compare with previous screenshot
-                        double similarity = CalculateImageSimilarity(previousBitmap, currentBitmap);
-
-                        if (similarity >= DuplicateThreshold)
-                        {
-                            // Mark current as duplicate
-                            toDelete.Add(screenshots[i]);
-                        }
-                        else
-                        {
-                            // This is different, update previous
-                            previousBitmap?.Dispose();
-                            previousBitmap = new Bitmap(currentBitmap);
-                        }
-                    }
-                    else
-                    {
-                        // First image, keep it
-                        previousBitmap = new Bitmap(currentBitmap);
-                    }
-                }
-                catch
-                {
-                    // Skip problematic images
-                    continue;
-                }
-            }
-
-            // Delete duplicates
-            foreach (var file in toDelete)
-            {
-                try
-                {
-                    File.Delete(file);
-                }
-                catch
-                {
-                    // Ignore deletion errors
-                }
-            }
-        }
-        finally
-        {
-            previousBitmap?.Dispose();
-        }
-
-        return toDelete.Count;
-    }
-
-    private double CalculateImageSimilarity(Bitmap img1, Bitmap img2)
-    {
-        // Quick check: different sizes = different images
-        if (img1.Width != img2.Width || img1.Height != img2.Height)
-            return 0.0;
-
-        // Sample pixels at regular intervals (every 10 pixels) for performance
-        int sampleSize = 10;
-        int matchingPixels = 0;
-        int totalSamples = 0;
-
-        for (int x = 0; x < img1.Width; x += sampleSize)
-        {
-            for (int y = 0; y < img1.Height; y += sampleSize)
-            {
-                try
-                {
-                    var pixel1 = img1.GetPixel(x, y);
-                    var pixel2 = img2.GetPixel(x, y);
-
-                    // Calculate color difference
-                    int rDiff = Math.Abs(pixel1.R - pixel2.R);
-                    int gDiff = Math.Abs(pixel1.G - pixel2.G);
-                    int bDiff = Math.Abs(pixel1.B - pixel2.B);
-
-                    // If colors are very similar (within 5 units), count as match
-                    if (rDiff < 5 && gDiff < 5 && bDiff < 5)
-                    {
-                        matchingPixels++;
-                    }
-
-                    totalSamples++;
-                }
-                catch
-                {
-                    // Skip invalid coordinates
-                    continue;
-                }
-            }
-        }
-
-        return totalSamples > 0 ? (double)matchingPixels / totalSamples : 0.0;
-    }
 }
+
