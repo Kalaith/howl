@@ -124,6 +124,65 @@ Rules for instructions:
 - Focus on intent, not mechanics";
     }
 
+    /// <summary>
+    /// Builds a prompt for refining a list of instructions with full context to ensure consistency.
+    /// </summary>
+    /// <param name="steps">The step candidates containing context information.</param>
+    /// <param name="initialInstructions">The initial instruction texts to be refined.</param>
+    /// <returns>A formatted prompt string for instruction refinement.</returns>
+    public string BuildRefinementPrompt(List<StepCandidate> steps, List<string> initialInstructions)
+    {
+        var promptText = new StringBuilder();
+        promptText.AppendLine("Review and refine these step-by-step instructions for accuracy and consistency.");
+        promptText.AppendLine();
+        promptText.AppendLine("Current instructions:");
+        for (int i = 0; i < initialInstructions.Count; i++)
+        {
+            promptText.AppendLine($"{i + 1}. {initialInstructions[i]}");
+        }
+        promptText.AppendLine();
+        promptText.AppendLine("Context for each step:");
+        for (int i = 0; i < steps.Count; i++)
+        {
+            promptText.AppendLine($"Step {i + 1}:");
+            promptText.AppendLine($"  Window: \"{steps[i].WindowTitle}\"");
+            if (!string.IsNullOrEmpty(steps[i].TextEntered))
+            {
+                promptText.AppendLine($"  Text entered: \"{steps[i].TextEntered}\"");
+            }
+            if (steps[i].Keystrokes.Any())
+            {
+                var shortcuts = steps[i].Keystrokes
+                    .Where(k => k.CtrlPressed || k.AltPressed || k.IsModifier)
+                    .Select(k => k.GetDisplayText())
+                    .Distinct()
+                    .ToList();
+                if (shortcuts.Any())
+                {
+                    promptText.AppendLine($"  Keyboard shortcuts: {string.Join(", ", shortcuts)}");
+                }
+            }
+        }
+        promptText.AppendLine();
+        promptText.AppendLine("Refine the instructions to:");
+        promptText.AppendLine("- Ensure step 1 and step " + steps.Count + " make sense as the beginning and end");
+        promptText.AppendLine("- Fix any contradictions (e.g., don't say 'started' and 'initiated' for different steps)");
+        promptText.AppendLine("- Make descriptions specific and actionable");
+        promptText.AppendLine("- Keep each instruction under 200 chars");
+        promptText.AppendLine();
+        promptText.AppendLine("Respond with a JSON object containing the refined instructions:");
+        promptText.AppendLine("{");
+        promptText.AppendLine("  \"instructions\": [");
+        promptText.AppendLine("    \"Refined instruction for step 1\",");
+        promptText.AppendLine("    \"Refined instruction for step 2\"");
+        promptText.AppendLine("  ]");
+        promptText.AppendLine("}");
+        promptText.AppendLine();
+        promptText.AppendLine("Respond with ONLY the JSON object, no markdown, no explanation.");
+
+        return promptText.ToString();
+    }
+
     private string FormatDuration(TimeSpan duration)
     {
         if (duration.TotalMinutes < 1)

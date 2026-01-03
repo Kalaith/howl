@@ -20,11 +20,13 @@ public class LMStudioService
 {
     private readonly LMStudioConfiguration _config;
     private readonly HttpClient _httpClient;
+    private readonly PromptBuilderService _promptBuilderService;
 
-    public LMStudioService(LMStudioConfiguration config, HttpClient httpClient)
+    public LMStudioService(LMStudioConfiguration config, HttpClient httpClient, PromptBuilderService promptBuilderService)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _promptBuilderService = promptBuilderService ?? throw new ArgumentNullException(nameof(promptBuilderService));
     }
 
     private string BuildEndpoint()
@@ -241,6 +243,14 @@ IMPORTANT: Respond with valid JSON only, no additional text."
         }
     }
 
+    /// <summary>
+    /// Refines a list of instructions by reviewing them with full context to fix contradictions
+    /// and ensure logical consistency from start to end.
+    /// </summary>
+    /// <param name="steps">The original step candidates with context.</param>
+    /// <param name="initialInstructions">The initial instruction texts to refine.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of refined instructions, or original if refinement fails.</returns>
     public async Task<List<string>> RefineInstructionsAsync(
         List<StepCandidate> steps,
         List<string> initialInstructions,
@@ -248,61 +258,15 @@ IMPORTANT: Respond with valid JSON only, no additional text."
     {
         Console.WriteLine($"[LM Studio] Refining {initialInstructions.Count} instructions with full context");
 
-        // Build context showing all steps together
-        var promptText = new StringBuilder();
-        promptText.AppendLine("Review and refine these step-by-step instructions for accuracy and consistency.");
-        promptText.AppendLine();
-        promptText.AppendLine("Current instructions:");
-        for (int i = 0; i < initialInstructions.Count; i++)
-        {
-            promptText.AppendLine($"{i + 1}. {initialInstructions[i]}");
-        }
-        promptText.AppendLine();
-        promptText.AppendLine("Context for each step:");
-        for (int i = 0; i < steps.Count; i++)
-        {
-            promptText.AppendLine($"Step {i + 1}:");
-            promptText.AppendLine($"  Window: \"{steps[i].WindowTitle}\"");
-            if (!string.IsNullOrEmpty(steps[i].TextEntered))
-            {
-                promptText.AppendLine($"  Text entered: \"{steps[i].TextEntered}\"");
-            }
-            if (steps[i].Keystrokes.Any())
-            {
-                var shortcuts = steps[i].Keystrokes
-                    .Where(k => k.CtrlPressed || k.AltPressed || k.IsModifier)
-                    .Select(k => k.GetDisplayText())
-                    .Distinct()
-                    .ToList();
-                if (shortcuts.Any())
-                {
-                    promptText.AppendLine($"  Keyboard shortcuts: {string.Join(", ", shortcuts)}");
-                }
-            }
-        }
-        promptText.AppendLine();
-        promptText.AppendLine("Refine the instructions to:");
-        promptText.AppendLine("- Ensure step 1 and step " + steps.Count + " make sense as the beginning and end");
-        promptText.AppendLine("- Fix any contradictions (e.g., don't say 'started' and 'initiated' for different steps)");
-        promptText.AppendLine("- Make descriptions specific and actionable");
-        promptText.AppendLine("- Keep each instruction under 200 chars");
-        promptText.AppendLine();
-        promptText.AppendLine("Respond with a JSON object containing the refined instructions:");
-        promptText.AppendLine("{");
-        promptText.AppendLine("  \"instructions\": [");
-        promptText.AppendLine("    \"Refined instruction for step 1\",");
-        promptText.AppendLine("    \"Refined instruction for step 2\"");
-        promptText.AppendLine("  ]");
-        promptText.AppendLine("}");
-        promptText.AppendLine();
-        promptText.AppendLine("Respond with ONLY the JSON object, no markdown, no explanation.");
+        // Build refinement prompt using PromptBuilderService
+        var promptText = _promptBuilderService.BuildRefinementPrompt(steps, initialInstructions);
 
         var messages = new List<object>
         {
             new
             {
                 role = "user",
-                content = promptText.ToString()
+                content = promptText
             }
         };
 
@@ -324,17 +288,17 @@ IMPORTANT: Respond with valid JSON only, no additional text."
 
         try
         {
-            var response = await _httpClient.SendAsync(request, cancellationToken);
+            var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
-                var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                var errorContent = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                 Console.WriteLine($"[LM Studio] Error during refinement: {errorContent}");
                 // Return original instructions if refinement fails
                 return initialInstructions;
             }
 
-            var responseContent = await response.Content.ReadAsStringAsync(cancellationToken);
+            var responseContent = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var options = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true

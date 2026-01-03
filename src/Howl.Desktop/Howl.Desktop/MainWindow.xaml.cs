@@ -71,14 +71,14 @@ public partial class MainWindow : Window
                 Timeout = TimeSpan.FromSeconds(120)
             };
 
-            // Initialize both AI services
-            _geminiService = new GeminiService(_geminiConfig, _httpClient);
-            _lmStudioService = new LMStudioService(_lmStudioConfig, _httpClient);
-
-            // Initialize other services
+            // Initialize other services (must be before AI services that depend on them)
             var recordingService = new ScreenRecordingService();
             var stepDetectionService = new StepDetectionService();
             var promptBuilderService = new PromptBuilderService();
+
+            // Initialize both AI services
+            _geminiService = new GeminiService(_geminiConfig, _httpClient);
+            _lmStudioService = new LMStudioService(_lmStudioConfig, _httpClient, promptBuilderService);
             var htmlExportService = new HtmlExportService();
             var debugExportService = new DebugExportService();
 

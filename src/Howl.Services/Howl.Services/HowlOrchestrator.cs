@@ -136,7 +136,7 @@ public class HowlOrchestrator
                 var refinedInstructions = await lmStudioService.RefineInstructionsAsync(
                     steps,
                     initialInstructions
-                );
+                ).ConfigureAwait(false);
 
                 // Update instructions with refined versions
                 for (int i = 0; i < instructions.Count && i < refinedInstructions.Count; i++)
@@ -251,7 +251,7 @@ public class HowlOrchestrator
                 var refinedInstructions = await lmStudioService.RefineInstructionsAsync(
                     steps,
                     initialInstructions
-                );
+                ).ConfigureAwait(false);
 
                 // Update instructions with refined versions
                 for (int i = 0; i < instructions.Count && i < refinedInstructions.Count; i++)
