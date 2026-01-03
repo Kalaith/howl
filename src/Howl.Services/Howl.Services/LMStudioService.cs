@@ -6,6 +6,7 @@ using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Howl.Core.Models;
@@ -240,6 +241,155 @@ IMPORTANT: Respond with valid JSON only, no additional text."
         }
     }
 
+    public async Task<List<string>> RefineInstructionsAsync(
+        List<StepCandidate> steps,
+        List<string> initialInstructions,
+        CancellationToken cancellationToken = default)
+    {
+        Console.WriteLine($"[LM Studio] Refining {initialInstructions.Count} instructions with full context");
+
+        // Build context showing all steps together
+        var promptText = new StringBuilder();
+        promptText.AppendLine("Review and refine these step-by-step instructions for accuracy and consistency.");
+        promptText.AppendLine();
+        promptText.AppendLine("Current instructions:");
+        for (int i = 0; i < initialInstructions.Count; i++)
+        {
+            promptText.AppendLine($"{i + 1}. {initialInstructions[i]}");
+        }
+        promptText.AppendLine();
+        promptText.AppendLine("Context for each step:");
+        for (int i = 0; i < steps.Count; i++)
+        {
+            promptText.AppendLine($"Step {i + 1}:");
+            promptText.AppendLine($"  Window: \"{steps[i].WindowTitle}\"");
+            if (!string.IsNullOrEmpty(steps[i].TextEntered))
+            {
+                promptText.AppendLine($"  Text entered: \"{steps[i].TextEntered}\"");
+            }
+            if (steps[i].Keystrokes.Any())
+            {
+                var shortcuts = steps[i].Keystrokes
+                    .Where(k => k.CtrlPressed || k.AltPressed || k.IsModifier)
+                    .Select(k => k.GetDisplayText())
+                    .Distinct()
+                    .ToList();
+                if (shortcuts.Any())
+                {
+                    promptText.AppendLine($"  Keyboard shortcuts: {string.Join(", ", shortcuts)}");
+                }
+            }
+        }
+        promptText.AppendLine();
+        promptText.AppendLine("Refine the instructions to:");
+        promptText.AppendLine("- Ensure step 1 and step " + steps.Count + " make sense as the beginning and end");
+        promptText.AppendLine("- Fix any contradictions (e.g., don't say 'started' and 'initiated' for different steps)");
+        promptText.AppendLine("- Make descriptions specific and actionable");
+        promptText.AppendLine("- Keep each instruction under 200 chars");
+        promptText.AppendLine();
+        promptText.AppendLine("Respond with a JSON object containing the refined instructions:");
+        promptText.AppendLine("{");
+        promptText.AppendLine("  \"instructions\": [");
+        promptText.AppendLine("    \"Refined instruction for step 1\",");
+        promptText.AppendLine("    \"Refined instruction for step 2\"");
+        promptText.AppendLine("  ]");
+        promptText.AppendLine("}");
+        promptText.AppendLine();
+        promptText.AppendLine("Respond with ONLY the JSON object, no markdown, no explanation.");
+
+        var messages = new List<object>
+        {
+            new
+            {
+                role = "user",
+                content = promptText.ToString()
+            }
+        };
+
+        var payload = new
+        {
+            model = _config.Model,
+            messages = messages,
+            temperature = 0.2,
+            max_tokens = 2048
+        };
+
+        var request = new HttpRequestMessage(HttpMethod.Post, BuildEndpoint())
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(payload),
+                Encoding.UTF8,
+                "application/json")
+        };
+
+        try
+        {
+            var response = await _httpClient.SendAsync(request, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                Console.WriteLine($"[LM Studio] Error during refinement: {errorContent}");
+                // Return original instructions if refinement fails
+                return initialInstructions;
+            }
+
+            var responseContent = await response.Content.ReadAsStringAsync(cancellationToken);
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+
+            var result = JsonSerializer.Deserialize<OpenAIResponse>(responseContent, options);
+
+            if (result?.Choices != null && result.Choices.Length > 0)
+            {
+                var rawContent = result.Choices[0].Message?.Content;
+                var jsonContent = ExtractJson(rawContent ?? string.Empty);
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(jsonContent);
+                    if (doc.RootElement.TryGetProperty("instructions", out var instructionsArray))
+                    {
+                        var refinedInstructions = new List<string>();
+                        foreach (var instruction in instructionsArray.EnumerateArray())
+                        {
+                            var text = instruction.GetString();
+                            if (!string.IsNullOrEmpty(text))
+                            {
+                                refinedInstructions.Add(text);
+                            }
+                        }
+
+                        if (refinedInstructions.Count == initialInstructions.Count)
+                        {
+                            Console.WriteLine($"[LM Studio] Successfully refined {refinedInstructions.Count} instructions");
+                            return refinedInstructions;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[LM Studio] Refinement returned {refinedInstructions.Count} instructions, expected {initialInstructions.Count}. Using original.");
+                            return initialInstructions;
+                        }
+                    }
+                }
+                catch (JsonException ex)
+                {
+                    Console.WriteLine($"[LM Studio] Failed to parse refined instructions: {ex.Message}");
+                }
+            }
+
+            // Fallback to original if anything fails
+            return initialInstructions;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[LM Studio] Error refining instructions: {ex.Message}");
+            return initialInstructions;
+        }
+    }
+
     public async Task<string> GenerateSingleStepInstructionAsync(
         string systemPrompt,
         StepCandidate currentStep,
@@ -249,9 +399,11 @@ IMPORTANT: Respond with valid JSON only, no additional text."
     {
         Console.WriteLine($"[LM Studio] Generating instruction for step {stepNumber}");
 
-        // Build prompt for this single step
+        // Build prompt matching IrisSort's pattern - start and end with strict JSON instruction
         var promptText = new StringBuilder();
-        promptText.AppendLine($"Step {stepNumber}:");
+        promptText.AppendLine("Analyze this screenshot and respond with ONLY a valid JSON object.");
+        promptText.AppendLine();
+        promptText.AppendLine($"Context for Step {stepNumber}:");
         promptText.AppendLine($"- Window: \"{currentStep.WindowTitle}\"");
 
         if (!string.IsNullOrEmpty(currentStep.TextEntered))
@@ -274,8 +426,20 @@ IMPORTANT: Respond with valid JSON only, no additional text."
         }
 
         promptText.AppendLine();
-        promptText.AppendLine("Based on the screenshot and actions above, write ONE clear instruction describing what happened.");
-        promptText.AppendLine("Respond with ONLY the instruction text, no JSON, no formatting, just the instruction sentence.");
+        promptText.AppendLine("Based on the screenshot and context, describe what action was performed.");
+        promptText.AppendLine();
+        promptText.AppendLine("{");
+        promptText.AppendLine("  \"instruction\": \"Clear, concise description of the action\"");
+        promptText.AppendLine("}");
+        promptText.AppendLine();
+        promptText.AppendLine("RULES:");
+        promptText.AppendLine("- instruction: One to two sentences describing what the user did, max 200 chars");
+        promptText.AppendLine("- Focus on the ACTION, not what's visible");
+        promptText.AppendLine("- Be specific and actionable - include what was clicked, typed, or navigated to");
+        promptText.AppendLine("- DO NOT include <think> tags or reasoning");
+        promptText.AppendLine("- DO NOT explain your thought process");
+        promptText.AppendLine();
+        promptText.AppendLine("Respond with ONLY the JSON object, no markdown, no explanation, no thinking.");
 
         var userContent = new List<object>();
 
@@ -317,13 +481,9 @@ IMPORTANT: Respond with valid JSON only, no additional text."
             });
         }
 
+        // Match IrisSort: NO system prompt, just user message
         var messages = new List<object>
         {
-            new
-            {
-                role = "system",
-                content = systemPrompt
-            },
             new
             {
                 role = "user",
@@ -335,9 +495,10 @@ IMPORTANT: Respond with valid JSON only, no additional text."
         {
             model = _config.Model,
             messages = messages,
-            temperature = _config.Temperature,
-            max_tokens = 150 // Shorter since we only need one instruction
+            temperature = 0.2, // Lower temperature like IrisSort for more consistent output
+            max_tokens = 1024 // Increased from 256 to allow for model thinking + actual response
         };
+
 
         var request = new HttpRequestMessage(HttpMethod.Post, BuildEndpoint())
         {
@@ -370,9 +531,35 @@ IMPORTANT: Respond with valid JSON only, no additional text."
 
             if (result?.Choices != null && result.Choices.Length > 0)
             {
-                var instruction = result.Choices[0].Message?.Content?.Trim();
+                var rawContent = result.Choices[0].Message?.Content;
+                var jsonContent = ExtractJson(rawContent ?? string.Empty);
+                string instruction = string.Empty;
+
+                try
+                {
+                    // Try to parse as JSON first
+                    using var doc = JsonDocument.Parse(jsonContent);
+                    if (doc.RootElement.TryGetProperty("instruction", out var prop))
+                    {
+                        instruction = prop.GetString() ?? string.Empty;
+                    }
+                    else
+                    {
+                        // Fallback: check if the whole content is just the instruction
+                        instruction = jsonContent;
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Not valid JSON, use the extracted text directly
+                    instruction = jsonContent;
+                }
+                
+                // Cleanup instruction (remove quotes if somehow still there, or whitespace)
+                instruction = instruction.Trim();
+                
                 Console.WriteLine($"[LM Studio] Step {stepNumber} instruction: {instruction}");
-                return instruction ?? string.Empty;
+                return instruction;
             }
 
             return string.Empty;
@@ -517,20 +704,111 @@ IMPORTANT: Respond with valid JSON only, no additional text."
         }
     }
 
-    private string ExtractJson(string text)
+    /// <summary>
+    /// Attempts to extract JSON object from a string that might contain extra text.
+    /// Handles <think> tags, markdown code blocks, and other wrapper text.
+    /// </summary>
+    private string ExtractJson(string content)
     {
-        // Try to find JSON object in the response
-        var startIndex = text.IndexOf('{');
-        var endIndex = text.LastIndexOf('}');
-
-        if (startIndex >= 0 && endIndex > startIndex)
+        if (string.IsNullOrWhiteSpace(content))
         {
-            return text.Substring(startIndex, endIndex - startIndex + 1);
+            return content;
         }
 
-        // If no JSON found, return original text
-        return text;
+        // Remove <think>...</think> blocks (some models use this for reasoning)
+        // Find the LAST </think> tag and take everything after it
+        var thinkEnd = content.LastIndexOf("</think>", StringComparison.OrdinalIgnoreCase);
+        if (thinkEnd >= 0)
+        {
+            content = content.Substring(thinkEnd + 8).Trim();
+        }
+
+        // Remove markdown code block markers
+        content = content.Replace("```json", "").Replace("```", "").Trim();
+
+        // Find the first { and last } with proper nesting
+        var start = content.IndexOf('{');
+        if (start < 0)
+        {
+            return content.Trim();
+        }
+
+        // Count braces to find matching closing brace
+        int depth = 0;
+        int end = -1;
+        for (int i = start; i < content.Length; i++)
+        {
+            if (content[i] == '{') depth++;
+            else if (content[i] == '}') depth--;
+
+            if (depth == 0)
+            {
+                end = i;
+                break;
+            }
+        }
+
+        if (end > start)
+        {
+            return content.Substring(start, end - start + 1);
+        }
+
+        // JSON appears truncated - try to repair by closing braces
+        var json = content.Substring(start);
+        return RepairTruncatedJson(json);
     }
+
+    /// <summary>
+    /// Attempts to repair truncated JSON by closing unclosed brackets.
+    /// </summary>
+    private string RepairTruncatedJson(string json)
+    {
+        Console.WriteLine("[LM Studio] Attempting to repair truncated JSON");
+        
+        // Count unclosed brackets
+        int braces = 0;
+        int brackets = 0;
+        bool inString = false;
+        char prevChar = '\0';
+
+        foreach (char c in json)
+        {
+            if (c == '"' && prevChar != '\\')
+            {
+                inString = !inString;
+            }
+            else if (!inString)
+            {
+                if (c == '{') braces++;
+                else if (c == '}') braces--;
+                else if (c == '[') brackets++;
+                else if (c == ']') brackets--;
+            }
+            prevChar = c;
+        }
+
+        // Close unclosed string if in middle of one
+        if (inString)
+        {
+            json += "\"";
+        }
+
+        // Close unclosed brackets
+        for (int i = 0; i < brackets; i++)
+        {
+            json += "]";
+        }
+
+        // Close unclosed braces
+        for (int i = 0; i < braces; i++)
+        {
+            json += "}";
+        }
+
+        Console.WriteLine($"[LM Studio] Repaired JSON (added {brackets} ] and {braces} }})");
+        return json;
+    }
+
 
     private string EncodeImageToBase64(string imagePath)
     {

@@ -126,6 +126,26 @@ public class HowlOrchestrator
                 instructions.Add(instruction);
             }
 
+            // Step 3.5: Refine instructions with full context for sanity check
+            if (_aiService is LMStudioService lmStudioService)
+            {
+                progressCallback?.Invoke("Refining instructions with full context...");
+                Console.WriteLine($"[Orchestrator] Running sanity check on {instructions.Count} instructions");
+
+                var initialInstructions = instructions.Select(i => i.Instruction).ToList();
+                var refinedInstructions = await lmStudioService.RefineInstructionsAsync(
+                    steps,
+                    initialInstructions
+                );
+
+                // Update instructions with refined versions
+                for (int i = 0; i < instructions.Count && i < refinedInstructions.Count; i++)
+                {
+                    instructions[i].Instruction = refinedInstructions[i];
+                    Console.WriteLine($"[Orchestrator] Step {i + 1} refined: {refinedInstructions[i]}");
+                }
+            }
+
             // Generate title and summary based on all instructions
             var response = new GeminiResponse
             {
@@ -219,6 +239,26 @@ public class HowlOrchestrator
                 }
 
                 instructions.Add(instruction);
+            }
+
+            // Step 3.5: Refine instructions with full context for sanity check
+            if (_aiService is LMStudioService lmStudioService)
+            {
+                progressCallback?.Invoke("Refining instructions with full context...");
+                Console.WriteLine($"[Orchestrator] Running sanity check on {instructions.Count} instructions");
+
+                var initialInstructions = instructions.Select(i => i.Instruction).ToList();
+                var refinedInstructions = await lmStudioService.RefineInstructionsAsync(
+                    steps,
+                    initialInstructions
+                );
+
+                // Update instructions with refined versions
+                for (int i = 0; i < instructions.Count && i < refinedInstructions.Count; i++)
+                {
+                    instructions[i].Instruction = refinedInstructions[i];
+                    Console.WriteLine($"[Orchestrator] Step {i + 1} refined: {refinedInstructions[i]}");
+                }
             }
 
             // Generate title and summary based on all instructions
